@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import urllib.error
+import urllib.parse
 import urllib.request
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,112 @@ OLLAMA_URL = _resolve_ollama_url()
 _cache: dict = {}
 
 
+# ---------------------------------------------------------------------------
+# IA en la nube (opcional): OpenAI / Gemini / Anthropic, todo con urllib (stdlib).
+# El usuario configura proveedor + API key UNA vez (octonove_core.aiconfig) y
+# generate() enruta ahi automaticamente. La key nunca se registra en logs.
+# ---------------------------------------------------------------------------
+def _ai_config() -> dict:
+    if "ai_config" not in _cache:
+        from . import aiconfig
+        _cache["ai_config"] = aiconfig.load()
+    return _cache["ai_config"]
+
+
+def _http_post_json(url: str, headers: dict, body: dict, timeout: float) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _openai_generate(prompt, system, model, key, timeout, temperature):
+    msgs = ([{"role": "system", "content": system}] if system else []) + \
+           [{"role": "user", "content": prompt}]
+    data = _http_post_json(
+        "https://api.openai.com/v1/chat/completions",
+        {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        {"model": model, "messages": msgs, "temperature": temperature, "max_tokens": 2048},
+        timeout)
+    choices = data.get("choices") or []
+    return (choices[0].get("message", {}).get("content", "").strip() if choices else "") or None
+
+
+def _anthropic_generate(prompt, system, model, key, timeout, temperature):
+    body = {"model": model, "max_tokens": 2048, "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}]}
+    if system:
+        body["system"] = system
+    data = _http_post_json(
+        "https://api.anthropic.com/v1/messages",
+        {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        body, timeout)
+    parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+    return ("".join(parts)).strip() or None
+
+
+def _gemini_generate(prompt, system, model, key, timeout, temperature):
+    # La key va en cabecera (x-goog-api-key), NO en la query string: asi nunca
+    # aparece en logs de errores ni en proxies intermedios.
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{urllib.parse.quote(model)}:generateContent")
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": 2048}}
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    data = _http_post_json(url, {"Content-Type": "application/json", "x-goog-api-key": key},
+                           body, timeout)
+    cands = data.get("candidates") or []
+    if not cands:
+        return None
+    parts = cands[0].get("content", {}).get("parts", [])
+    return ("".join(p.get("text", "") for p in parts)).strip() or None
+
+
+_CLOUD = {"openai": _openai_generate, "anthropic": _anthropic_generate, "gemini": _gemini_generate}
+
+
+def _active_cloud() -> tuple[str, str, str] | None:
+    """(provider, api_key, model) si hay un proveedor de nube configurado con key; si no None."""
+    cfg = _ai_config()
+    prov = cfg.get("provider")
+    key = cfg.get("api_key")
+    if prov in _CLOUD and key:
+        from . import aiconfig
+        mdl = cfg.get("model") or aiconfig.CLOUD_MODELS[prov]["default"]
+        return prov, key, mdl
+    return None
+
+
+def test_provider(provider: str, api_key: str = "", model: str = "",
+                  timeout: float = 20.0) -> tuple[bool, str]:
+    """Prueba de conexion para el dialogo de configuracion. Devuelve (ok, mensaje)."""
+    if provider == "ollama":
+        return (available(timeout=4.0),
+                "Ollama detectado y con modelos." if available(4.0)
+                else "No se detecta Ollama (arrancalo o instala un modelo).")
+    fn = _CLOUD.get(provider)
+    if not fn:
+        return (False, "Proveedor desconocido.")
+    if not api_key:
+        return (False, "Falta la API key.")
+    from . import aiconfig
+    mdl = model or aiconfig.CLOUD_MODELS[provider]["default"]
+    try:
+        out = fn("Responde solo: OK", None, mdl, api_key, timeout, 0.0)
+        return (bool(out), "Conexion correcta." if out else "Conecto pero no respondio texto.")
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        if code in (401, 403):
+            return (False, "API key rechazada (401/403). Revisala.")
+        if code == 404:
+            return (False, f"Modelo '{mdl}' no encontrado (404). Prueba otro.")
+        if code == 429:
+            return (False, "Limite de uso alcanzado (429). Espera o revisa tu plan.")
+        return (False, f"Error HTTP {code}.")
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+        return (False, f"No se pudo conectar: {exc}")
+
+
 def _get(path: str, timeout: float):
     with urllib.request.urlopen(OLLAMA_URL + path, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
@@ -66,11 +173,17 @@ def list_models(timeout: float = 3.0) -> list[str]:
 
 
 def available(timeout: float = 3.0) -> bool:
-    """True si Ollama responde y tiene al menos un modelo instalado."""
+    """True si hay IA disponible: proveedor de nube configurado con key, o bien
+    Ollama respondiendo con al menos un modelo."""
+    if _active_cloud() is not None:
+        return True
     return bool(list_models(timeout))
 
 
 def default_model() -> str | None:
+    cloud = _active_cloud()
+    if cloud is not None:
+        return cloud[2]   # el modelo del proveedor de nube configurado
     if "model" not in _cache:
         # el filtro 'embed' evita elegir un modelo de embeddings como modelo de chat
         models = [m for m in list_models() if "embed" not in m.lower()]
@@ -90,7 +203,21 @@ def default_embed_model() -> str | None:
 
 def generate(prompt: str, *, system: str | None = None, model: str | None = None,
              timeout: float = 120.0, temperature: float = 0.3) -> str | None:
-    """Devuelve la respuesta del modelo, o None si Ollama no esta o falla."""
+    """Devuelve la respuesta del modelo, o None si falla / no hay IA.
+
+    Enruta al proveedor de nube configurado (OpenAI/Gemini/Anthropic) si lo hay;
+    si no, a Ollama en local. El `model` recibido es un modelo de Ollama y se
+    ignora en la nube (esta usa el modelo de octonove_core.aiconfig)."""
+    cloud = _active_cloud()
+    if cloud is not None:
+        prov, key, mdl = cloud
+        try:
+            return _CLOUD[prov](prompt, system, mdl, key, timeout, temperature)
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError,
+                AttributeError, TypeError, KeyError) as exc:
+            logger.warning("IA en la nube (%s) fallo: %s", prov, exc)
+            return None
+
     model = model or default_model()
     if not model:
         return None

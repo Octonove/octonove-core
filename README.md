@@ -9,7 +9,10 @@ Cada app mantiene módulos *shim* del mismo nombre que re-exportan de aquí y a�
 | Módulo | Contenido |
 |---|---|
 | `theme.py` | Sistema de diseño Tkinter navy/terracota: paleta, estilos ttk, `header()`, `status_bar()`, `center_window()` |
-| `llm.py` | Capa Ollama local opcional: detección (127.0.0.1 + `OLLAMA_HOST`), `generate()` con reintento, embeddings, recomendación de modelo según el PC |
+| `llm.py` | Capa de IA opcional: **Ollama local** (127.0.0.1 + `OLLAMA_HOST`, embeddings, recomendación por PC) **o una API en la nube** (OpenAI / Gemini / Anthropic) vía `urllib`. `generate()` enruta al proveedor configurado; `test_provider()` prueba la conexión |
+| `aiconfig.py` | Config de IA **compartida por toda la suite** (`APPDATA/Octonove/ai.json`): proveedor + modelo + API key (cifrada con DPAPI). Se configura una vez y vale para las 5 apps |
+| `ai_dialog.py` | Diálogo Tkinter unificado para elegir IA (Ollama gratis o API con clave) + `status_text()` |
+| `dpapi.py` | Cifrado de secretos en reposo con DPAPI de Windows (API keys, stream key) |
 | `config.py` | Rutas de datos (`get_data_dir`, `work_dir`, `models_dir` con carpetas compartidas), carga/guardado genérico con hooks (`post_load`/`pre_save`), `RedactingFilter` y `setup_logging` |
 | `procutil.py` | Subprocesos sin ventana de consola (`CREATE_NO_WINDOW` con guard de plataforma, `subprocess_kwargs`, `_decode`) |
 | `ffmpeg.py` | Localización de FFmpeg (incl. winget), `ffprobe_from`, `get_duration`, `has_whisper` |
