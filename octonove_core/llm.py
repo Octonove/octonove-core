@@ -129,6 +129,24 @@ def _active_cloud() -> tuple[str, str, str] | None:
     return None
 
 
+def _http_error_detail(exc) -> str:
+    """Extrae el mensaje de error que devuelve la API en el cuerpo JSON (p.ej.
+    'API key not valid' o 'Generative Language API has not been used…'). Asi el
+    usuario ve el motivo real en vez de un 'Error HTTP 400' mudo."""
+    try:
+        data = json.loads(exc.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001  (extractor best-effort: nunca debe lanzar,
+        return ""      # incl. http.client.IncompleteRead, que no es OSError)
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("status") or ""
+    elif isinstance(err, str):
+        msg = err
+    else:
+        msg = data.get("message", "") if isinstance(data, dict) else ""
+    return (msg or "").strip()[:200]
+
+
 def test_provider(provider: str, api_key: str = "", model: str = "",
                   timeout: float = 20.0) -> tuple[bool, str]:
     """Prueba de conexion para el dialogo de configuracion. Devuelve (ok, mensaje)."""
@@ -148,13 +166,16 @@ def test_provider(provider: str, api_key: str = "", model: str = "",
         return (bool(out), "Conexion correcta." if out else "Conecto pero no respondio texto.")
     except urllib.error.HTTPError as exc:
         code = exc.code
+        detail = _http_error_detail(exc)
         if code in (401, 403):
-            return (False, "API key rechazada (401/403). Revisala.")
+            return (False, (f"API key rechazada o sin permisos ({code}). " + (detail or "Revisala.")).strip())
         if code == 404:
-            return (False, f"Modelo '{mdl}' no encontrado (404). Prueba otro.")
+            return (False, (f"Modelo '{mdl}' no encontrado (404). Prueba otro. " + detail).strip())
         if code == 429:
             return (False, "Limite de uso alcanzado (429). Espera o revisa tu plan.")
-        return (False, f"Error HTTP {code}.")
+        if code == 400:
+            return (False, (f"Peticion rechazada (400). " + (detail or "Revisa la API key y el modelo.")).strip())
+        return (False, (f"Error HTTP {code}. " + detail).strip())
     except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
         return (False, f"No se pudo conectar: {exc}")
 

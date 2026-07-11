@@ -102,54 +102,97 @@ def show_ai_dialog(parent, on_saved=None) -> None:
                 pass
         threading.Thread(target=work, daemon=True).start()
 
-    def _render() -> None:
-        for w in body.winfo_children():
-            w.destroy()
-        prov = var_prov.get()
-        if prov == "ollama":
+    # estado del render: proveedor mostrado y "generacion" (para descartar la
+    # deteccion de Ollama en segundo plano si el usuario cambia de proveedor antes
+    # de que termine).
+    state = {"prov": var_prov.get(), "gen": 0}
+
+    def _render_ollama(gen: int) -> None:
+        ttk.Label(body, text="Ollama corre modelos en tu propio PC: gratis y sin que\n"
+                  "nada salga de tu ordenador.", style="CardMuted.TLabel",
+                  justify="left").pack(anchor="w")
+        loading = ttk.Label(body, text="Detectando Ollama y modelos instalados…",
+                            style="CardMuted.TLabel")
+        loading.pack(anchor="w", pady=(8, 0))
+
+        def work():
+            # Estas llamadas tocan disco/red (list_models espera hasta 4 s si Ollama
+            # no responde): en el hilo de UI congelarian el dialogo al elegir Ollama.
             ram, gpu = llm.system_ram_gb(), llm.has_gpu()
             rec, size, motivo = llm.recommend_model(ram, gpu)
-            ttk.Label(body, text="Ollama corre modelos en tu propio PC: gratis y sin que\n"
-                      "nada salga de tu ordenador.", style="CardMuted.TLabel",
-                      justify="left").pack(anchor="w")
             mods = llm.list_models(timeout=4.0)
-            if mods:
-                chat = [m for m in mods if "embed" not in m.lower()] or mods
-                ttk.Label(body, text="Modelo:", style="H.TLabel").pack(anchor="w", pady=(8, 2))
-                if var_model.get() not in chat:
-                    var_model.set(chat[0])
-                ttk.Combobox(body, textvariable=var_model, values=chat, state="readonly",
-                             width=34).pack(anchor="w")
-            else:
-                ttk.Label(body, text=f"No se detecta Ollama. Instalalo en ollama.com y ejecuta:\n"
-                          f"    ollama run {rec}   ({size} — {motivo})",
-                          style="CardMuted.TLabel", justify="left").pack(anchor="w", pady=(8, 0))
-                ttk.Button(body, text="Abrir ollama.com",
-                           command=lambda: webbrowser.open("https://ollama.com")).pack(
-                    anchor="w", pady=(6, 0))
-        else:
-            info = aiconfig.CLOUD_MODELS[prov]
-            ttk.Label(body, text="Pega tu API key. Se cifra en tu equipo (DPAPI) y no se\n"
-                      "guarda en claro ni se registra en ningun log.",
-                      style="CardMuted.TLabel", justify="left").pack(anchor="w")
-            ttk.Label(body, text="API key:", style="H.TLabel").pack(anchor="w", pady=(8, 2))
-            ent = ttk.Entry(body, textvariable=var_key, width=44, show="•")
-            ent.pack(anchor="w")
 
-            def _toggle():
-                ent.config(show="" if var_show.get() else "•")
-            ttk.Checkbutton(body, text="Mostrar", variable=var_show,
-                            command=_toggle).pack(anchor="w", pady=(2, 0))
-            ttk.Button(body, text="Conseguir una API key…",
-                       command=lambda p=prov: webbrowser.open(_GET_KEY_URL[p])).pack(
-                anchor="w", pady=(2, 0))
-            ttk.Label(body, text="Modelo:", style="H.TLabel").pack(anchor="w", pady=(8, 2))
-            if not var_model.get():
-                var_model.set(info["default"])
-            ttk.Combobox(body, textvariable=var_model, values=info["options"],
-                         width=34).pack(anchor="w")
-            ttk.Label(body, text=f"Recomendado (economico): {info['default']}",
-                      style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+            def apply():
+                # Descartar si el usuario cambio de proveedor (gen) O cerro el
+                # dialogo (body destruido): sin el winfo_exists, crear widgets sobre
+                # un `body` ya destruido lanzaria un TclError sin capturar.
+                if gen != state["gen"] or not body.winfo_exists():
+                    return
+                try:
+                    loading.destroy()
+                except tk.TclError:
+                    return
+                chat = [m for m in mods if "embed" not in m.lower()] or mods
+                if chat:
+                    ttk.Label(body, text="Modelo:", style="H.TLabel").pack(anchor="w", pady=(8, 2))
+                    if var_model.get() not in chat:
+                        var_model.set(chat[0])
+                    ttk.Combobox(body, textvariable=var_model, values=chat, state="readonly",
+                                 width=34).pack(anchor="w")
+                else:
+                    ttk.Label(body, text="No se detecta Ollama. Instalalo en ollama.com y ejecuta:\n"
+                              f"    ollama run {rec}   ({size} — {motivo})",
+                              style="CardMuted.TLabel", justify="left").pack(anchor="w", pady=(8, 0))
+                    ttk.Button(body, text="Abrir ollama.com",
+                               command=lambda: webbrowser.open("https://ollama.com")).pack(
+                        anchor="w", pady=(6, 0))
+            try:
+                win.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _render_cloud(prov: str) -> None:
+        info = aiconfig.CLOUD_MODELS[prov]
+        ttk.Label(body, text="Pega tu API key. Se cifra en tu equipo (DPAPI) y no se\n"
+                  "guarda en claro ni se registra en ningun log.",
+                  style="CardMuted.TLabel", justify="left").pack(anchor="w")
+        ttk.Label(body, text="API key:", style="H.TLabel").pack(anchor="w", pady=(8, 2))
+        ent = ttk.Entry(body, textvariable=var_key, width=44, show="•")
+        ent.pack(anchor="w")
+
+        def _toggle():
+            ent.config(show="" if var_show.get() else "•")
+        ttk.Checkbutton(body, text="Mostrar", variable=var_show,
+                        command=_toggle).pack(anchor="w", pady=(2, 0))
+        ttk.Button(body, text="Conseguir una API key…",
+                   command=lambda p=prov: webbrowser.open(_GET_KEY_URL[p])).pack(
+            anchor="w", pady=(2, 0))
+        ttk.Label(body, text="Modelo:", style="H.TLabel").pack(anchor="w", pady=(8, 2))
+        # var_model se resetea a "" al cambiar de proveedor (ver _render), asi que
+        # aqui coge el modelo por defecto de ESTE proveedor y nunca arrastra uno de
+        # otro (un modelo de Ollama en Gemini daria 404 y parecia que "no detecta la
+        # key"). Un modelo de nube personalizado ya guardado se respeta al reabrir.
+        if not var_model.get():
+            var_model.set(info["default"])
+        ttk.Combobox(body, textvariable=var_model, values=info["options"],
+                     width=34).pack(anchor="w")
+        ttk.Label(body, text=f"Recomendado (economico): {info['default']}",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
+
+    def _render() -> None:
+        prov = var_prov.get()
+        if prov != state["prov"]:
+            # el modelo del proveedor anterior no vale para el nuevo: reset
+            state["prov"] = prov
+            var_model.set("")
+        state["gen"] += 1
+        for w in body.winfo_children():
+            w.destroy()
+        if prov == "ollama":
+            _render_ollama(state["gen"])
+        else:
+            _render_cloud(prov)
 
     def _save() -> None:
         prov = var_prov.get()
