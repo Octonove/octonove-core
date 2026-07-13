@@ -159,3 +159,45 @@ def status_bar(parent: tk.Misc, text: str = "") -> ttk.Label:
     lbl = ttk.Label(parent, text=text, style="Status.TLabel", anchor="w")
     lbl.pack(fill="x", side="bottom")
     return lbl
+
+
+def scrollable(parent: tk.Misc, *, width: int | None = None):
+    """Columna con scroll VERTICAL cuando su contenido no cabe en alto.
+
+    Devuelve el frame INTERIOR: mete ahi tus widgets con pack/grid normalmente.
+    El ancho se ajusta al contenido (no recorta en horizontal) y la barra solo
+    aparece si hace falta. Evita que paneles altos queden 'cortados' por abajo
+    en ventanas pequenas o con texto grande (escalado DPI alto).
+    """
+    holder = ttk.Frame(parent)
+    canvas = tk.Canvas(holder, highlightthickness=0, borderwidth=0, bg=BG)
+    vsb = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    inner = ttk.Frame(canvas)
+    win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _sync(_e=None):
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            req_w = width or inner.winfo_reqwidth()
+            canvas.configure(width=req_w)              # sin recorte horizontal
+            need = inner.winfo_reqheight() > canvas.winfo_height() + 1
+            if need and not vsb.winfo_ismapped():
+                vsb.pack(side="right", fill="y")
+            elif not need and vsb.winfo_ismapped():
+                vsb.pack_forget()
+        except tk.TclError:
+            pass
+
+    inner.bind("<Configure>", _sync)
+    canvas.bind("<Configure>", _sync)
+
+    def _wheel(ev):
+        if inner.winfo_reqheight() > canvas.winfo_height() + 1:
+            canvas.yview_scroll(-1 if ev.delta > 0 else 1, "units")
+    # el binado se activa solo mientras el puntero esta sobre la columna
+    canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _wheel))
+    canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+    holder.inner = inner        # por si el llamador quiere el interior via .inner
+    return holder, inner
