@@ -103,15 +103,25 @@ def load_config(config_path: Path, config_cls, post_load=None):
 
 def save_config(cfg, config_path: Path, pre_save=None) -> None:
     """Guardado generico. El hook pre_save(data) opera sobre la COPIA asdict y
-    nunca muta cfg (p.ej. sustituir stream_key por su version cifrada)."""
+    nunca muta cfg (p.ej. sustituir stream_key por su version cifrada).
+
+    Escritura ATOMICA (tmp + os.replace en el mismo directorio): un corte de luz
+    o crash a mitad de escritura no debe dejar un config.json truncado, que las
+    apps tratarian como corrupto y resetearian TODOS los ajustes en silencio."""
+    tmp = config_path.with_suffix(config_path.suffix + ".tmp")
     try:
         data = asdict(cfg)
         if pre_save:
             pre_save(data)
-        config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False),
-                               encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, config_path)
     except OSError as exc:
         logger.error("No se pudo guardar la config: %s", exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # -------------------------------------------------------------------- logging
